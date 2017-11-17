@@ -22,18 +22,13 @@ namespace GitHub.Unity
             this.cancellationToken = cancellationToken;
         }
 
-        public T Configure<T>(T processTask, bool withInput = false) where T : IProcess
-        {
-            return Configure(processTask,
-                processTask.ProcessName?.ToNPath() ?? environment.GitExecutablePath,
-                processTask.ProcessArguments,
-                environment.RepositoryPath, withInput);
-        }
-
-        public T Configure<T>(T processTask, string executableFileName, string arguments, NPath workingDirectory = null, bool withInput = false)
+        public T Configure<T>(T processTask, NPath executable = null, string arguments = null, NPath workingDirectory = null, bool withInput = false)
              where T : IProcess
         {
-            Guard.ArgumentNotNull(executableFileName, nameof(executableFileName));
+            executable = executable ?? processTask.ProcessName?.ToNPath() ?? environment.GitExecutablePath;
+
+            //If this null check fails, be sure you called Configure() on your task
+            Guard.ArgumentNotNull(executable, nameof(executable));
 
             var startInfo = new ProcessStartInfo
             {
@@ -48,19 +43,20 @@ namespace GitHub.Unity
 
             gitEnvironment.Configure(startInfo, workingDirectory ?? environment.RepositoryPath);
 
-            var execPath = executableFileName.ToNPath();
-            if (execPath.IsRelative)
-                executableFileName = FindExecutableInPath(execPath, startInfo.EnvironmentVariables["PATH"]) ?? execPath.FileName;
-            startInfo.FileName = executableFileName;
-            startInfo.Arguments = arguments;
+            if (executable.IsRelative)
+            {
+                executable = executable.FileName.ToNPath();
+                executable = FindExecutableInPath(executable, startInfo.EnvironmentVariables["PATH"]) ?? executable;
+            }
+            startInfo.FileName = executable;
+            startInfo.Arguments = arguments ?? processTask.ProcessArguments;
             processTask.Configure(startInfo);
             return processTask;
         }
 
-        public IProcess RunCommandLineWindow(NPath workingDirectory)
+        public void RunCommandLineWindow(NPath workingDirectory)
         {
-            var shell = environment.IsWindows ? "cmd" : environment.IsMac ? "xterm" : "sh";
-            var startInfo = new ProcessStartInfo(shell)
+            var startInfo = new ProcessStartInfo
             {
                 RedirectStandardInput = false,
                 RedirectStandardOutput = false,
@@ -69,11 +65,36 @@ namespace GitHub.Unity
                 CreateNoWindow = false
             };
 
-            gitEnvironment.Configure(startInfo, workingDirectory);
-            var p = new ProcessTask<string>(cancellationToken, new SimpleOutputProcessor());
-            p.Configure(startInfo);
-            p.Start();
-            return p;
+            if (environment.IsWindows)
+            {
+                startInfo.FileName = "cmd";
+                gitEnvironment.Configure(startInfo, workingDirectory);
+            }
+            else if (environment.IsMac)
+            {
+                // we need to create a temp bash script to set up the environment properly, because
+                // osx terminal app doesn't inherit the PATH env var and there's no way to pass it in
+
+                var envVarFile = NPath.GetTempFilename();
+                startInfo.FileName = "open";
+                startInfo.Arguments = $"-a Terminal {envVarFile}";
+                gitEnvironment.Configure(startInfo, workingDirectory);
+
+                var envVars = startInfo.EnvironmentVariables;
+                var scriptContents = new[] {
+                    $"cd {envVars["GHU_WORKINGDIR"]}",
+                    $"PATH={envVars["GHU_FULLPATH"]}:$PATH /bin/bash"
+                };
+                environment.FileSystem.WriteAllLines(envVarFile, scriptContents);
+                Mono.Unix.Native.Syscall.chmod(envVarFile, (Mono.Unix.Native.FilePermissions)493); // -rwxr-xr-x mode (0755)
+            }
+            else
+            {
+                startInfo.FileName = "sh";
+                gitEnvironment.Configure(startInfo, workingDirectory);
+            }
+
+            Process.Start(startInfo);
         }
 
         public IProcess Reconnect(IProcess processTask, int pid)

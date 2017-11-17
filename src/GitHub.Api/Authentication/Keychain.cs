@@ -6,7 +6,7 @@ using Octokit;
 
 namespace GitHub.Unity
 {
-    struct Connection
+    public struct Connection
     {
         public UriString Host;
         public string Username;
@@ -64,14 +64,15 @@ namespace GitHub.Unity
                 logger.Warning("Cannot load host from Credential Manager; removing from cache");
                 await Clear(host, false);
             }
-            else if (keychainItem.Username != cachedConnection.Username)
-            {
-                logger.Warning("Item loaded from credential manager does not match connection cache ; removing from cache");
-                await Clear(host, false);
-            }
             else
             {
-                logger.Trace($@"Loaded from Credential Manager Host:""{keychainItem.Host}"" Username:""{keychainItem.Username}""");
+                if (keychainItem.Username != cachedConnection.Username)
+                {
+                    logger.Warning("Keychain Username:\"{0}\" does not match cached Username:\"{1}\"; Hopefully it works", keychainItem.Username, cachedConnection.Username);
+                }
+
+                logger.Trace("Loaded from Credential Manager Host:\"{0}\" Username:\"{1}\"", keychainItem.Host, keychainItem.Username); 
+
                 keychainAdapter.Set(keychainItem);
             }
 
@@ -230,5 +231,7 @@ namespace GitHub.Unity
         public IList<UriString> Hosts => connectionCache.Keys.ToArray();
 
         public bool HasKeys => connectionCache.Any();
+
+        public bool NeedsLoad => HasKeys && FindOrCreateAdapter(connectionCache.First().Value.Host).OctokitCredentials == Credentials.Anonymous;
     }
 }

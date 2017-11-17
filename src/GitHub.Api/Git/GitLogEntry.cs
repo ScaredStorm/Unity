@@ -6,7 +6,7 @@ using System.Text;
 namespace GitHub.Unity
 {
     [Serializable]
-    struct GitLogEntry
+    public struct GitLogEntry
     {
         private const string Today = "Today";
         private const string Yesterday = "Yesterday";
@@ -42,7 +42,7 @@ namespace GitHub.Unity
             }
         }
 
-        [NonSerialized] public DateTimeOffset? timeValue;
+        [NonSerialized] private DateTimeOffset? timeValue;
         public DateTimeOffset Time
         {
             get
@@ -56,7 +56,7 @@ namespace GitHub.Unity
             }
         }
 
-        [NonSerialized] public DateTimeOffset? commitTimeValue;
+        [NonSerialized] private DateTimeOffset? commitTimeValue;
         public DateTimeOffset? CommitTime
         {
             get

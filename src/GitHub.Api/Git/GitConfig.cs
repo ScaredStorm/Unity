@@ -1,16 +1,16 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
 namespace GitHub.Unity
 {
+    [Serializable]
     public struct ConfigRemote
     {
-        public string Name { get; set; }
-        public string Url { get; set; }
+        public string Name;
+        public string Url;
 
         public override string ToString()
         {
@@ -18,10 +18,11 @@ namespace GitHub.Unity
         }
     }
 
+    [Serializable]
     public struct ConfigBranch
     {
-        public string Name { get; set; }
-        public ConfigRemote? Remote { get; set; }
+        public string Name;
+        public ConfigRemote? Remote;
         public bool IsTracking => Remote.HasValue;
 
         public override string ToString()
@@ -30,7 +31,7 @@ namespace GitHub.Unity
         }
     }
 
-    interface IGitConfig
+    public interface IGitConfig
     {
         void Reset();
         IEnumerable<ConfigBranch> GetBranches();
@@ -85,10 +86,11 @@ namespace GitHub.Unity
             return groups
                 .Where(x => x.Key == "remote")
                 .SelectMany(x => x.Value)
+                .Where(x => x.Value.TryGetString("url") != null)
                 .Select(x => new ConfigRemote
                 {
                     Name = x.Key,
-                    Url = x.Value.GetString("url")
+                    Url = x.Value.TryGetString("url")
                 });
         }
 
@@ -97,7 +99,7 @@ namespace GitHub.Unity
             return groups
                 .Where(x => x.Key == "remote")
                 .SelectMany(x => x.Value)
-                .Where(x => x.Key == remote)
+                .Where(x => x.Key == remote && x.Value.TryGetString("url") != null)
                 .Select(x => new ConfigRemote
                 {
                     Name = x.Key,
@@ -214,16 +216,16 @@ namespace GitHub.Unity
             public int GetInt(string key)
             {
                 var value = this[key];
-                var result = 0;
-                var success = int.TryParse(value, out result);
+                int result = 0;
+                int.TryParse(value, out result);
                 return result;
             }
 
             public float GetFloat(string key)
             {
                 var value = this[key];
-                var result = 0F;
-                var success = float.TryParse(value, out result);
+                float result = 0F;
+                float.TryParse(value, out result);
                 return result;
             }
 

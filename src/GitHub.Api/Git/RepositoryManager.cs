@@ -1,27 +1,31 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace GitHub.Unity
 {
-    interface IRepositoryManager : IDisposable
+    public interface IRepositoryManager : IDisposable
     {
-        event Action<string> OnActiveBranchChanged;
-        event Action<ConfigRemote?> OnActiveRemoteChanged;
+        event Action<ConfigBranch?, ConfigRemote?> OnCurrentBranchAndRemoteUpdated;
+        event Action<IUser> OnGitUserLoaded;
         event Action<bool> OnIsBusyChanged;
-        event Action OnLocalBranchListChanged;
-        event Action OnHeadChanged;
-        event Action<GitStatus> OnStatusUpdated;
-        event Action<IEnumerable<GitLock>> OnLocksUpdated;
-        event Action OnRemoteBranchListChanged;
-        event Action OnRemoteOrTrackingChanged;
+        event Action<string> OnLocalBranchAdded;
+        event Action<Dictionary<string, ConfigBranch>> OnLocalBranchListUpdated;
+        event Action<string> OnLocalBranchRemoved;
+        event Action<string> OnLocalBranchUpdated;
+        event Action<string, string> OnRemoteBranchAdded;
+        event Action<Dictionary<string, ConfigRemote>, Dictionary<string, Dictionary<string, ConfigBranch>>> OnRemoteBranchListUpdated;
+        event Action<string, string> OnRemoteBranchRemoved;
+        event Action OnRepositoryUpdated;
+
         void Initialize();
         void Start();
         void Stop();
-        void Refresh();
+        ITask CommitAllFiles(string message, string body);
         ITask CommitFiles(List<string> files, string message, string body);
+        ITask<List<GitLogEntry>> Log();
+        ITask<GitStatus> Status();
         ITask Fetch(string remote);
         ITask Pull(string remote, string branch);
         ITask Push(string remote, string branch);
@@ -32,17 +36,15 @@ namespace GitHub.Unity
         ITask SwitchBranch(string branch);
         ITask DeleteBranch(string branch, bool deleteUnmerged = false);
         ITask CreateBranch(string branch, string baseBranch);
-        ITask ListLocks(bool local);
+        ITask<List<GitLock>> ListLocks(bool local);
         ITask LockFile(string file);
         ITask UnlockFile(string file, bool force);
-        Dictionary<string, ConfigBranch> LocalBranches { get; }
-        Dictionary<string, Dictionary<string, ConfigBranch>> RemoteBranches { get; }
+        int WaitForEvents();
+        void UpdateConfigData();
+
         IGitConfig Config { get; }
-        ConfigBranch? ActiveBranch { get; }
-        ConfigRemote? ActiveRemote { get; }
         IGitClient GitClient { get; }
         bool IsBusy { get; }
-        int WaitForEvents();
     }
 
     interface IRepositoryPathConfiguration
@@ -90,36 +92,40 @@ namespace GitHub.Unity
 
     class RepositoryManager : IRepositoryManager
     {
-        private readonly Dictionary<string, ConfigBranch> branches = new Dictionary<string, ConfigBranch>();
-        private readonly CancellationToken cancellationToken;
         private readonly IGitConfig config;
         private readonly IGitClient gitClient;
         private readonly IPlatform platform;
         private readonly IRepositoryPathConfiguration repositoryPaths;
-        private readonly ITaskManager taskManager;
-        private readonly IUsageTracker usageTracker;
         private readonly IRepositoryWatcher watcher;
 
-        private ConfigBranch? activeBranch;
-        private ConfigRemote? activeRemote;
-        private string head;
         private bool isBusy;
-        private IEnumerable<GitLock> locks;
-        private Dictionary<string, Dictionary<string, ConfigBranch>> remoteBranches = new Dictionary<string, Dictionary<string, ConfigBranch>>();
-        private Dictionary<string, ConfigRemote> remotes;
-        private Action repositoryUpdateCallback;
 
-        public event Action<string> OnActiveBranchChanged;
-        public event Action<ConfigRemote?> OnActiveRemoteChanged;
-        public event Action OnHeadChanged;
+        public event Action<ConfigBranch?, ConfigRemote?> OnCurrentBranchAndRemoteUpdated;
+        public event Action<IUser> OnGitUserLoaded;
         public event Action<bool> OnIsBusyChanged;
-        public event Action OnLocalBranchListChanged;
-        public event Action<IEnumerable<GitLock>> OnLocksUpdated;
-        public event Action OnRemoteBranchListChanged;
-        public event Action OnRemoteOrTrackingChanged;
-        public event Action<GitStatus> OnStatusUpdated;
+        public event Action<string> OnLocalBranchAdded;
+        public event Action<Dictionary<string, ConfigBranch>> OnLocalBranchListUpdated;
+        public event Action<string> OnLocalBranchRemoved;
+        public event Action<string> OnLocalBranchUpdated;
+        public event Action<string, string> OnRemoteBranchAdded;
+        public event Action<Dictionary<string, ConfigRemote>, Dictionary<string, Dictionary<string, ConfigBranch>>> OnRemoteBranchListUpdated;
+        public event Action<string, string> OnRemoteBranchRemoved;
+        public event Action OnRepositoryUpdated;
 
-        public static RepositoryManager CreateInstance(IPlatform platform, ITaskManager taskManager, IUsageTracker usageTracker,
+        public RepositoryManager(IPlatform platform, IGitConfig gitConfig,
+            IRepositoryWatcher repositoryWatcher, IGitClient gitClient,
+            IRepositoryPathConfiguration repositoryPaths)
+        {
+            this.repositoryPaths = repositoryPaths;
+            this.platform = platform;
+            this.gitClient = gitClient;
+            this.watcher = repositoryWatcher;
+            this.config = gitConfig;
+
+            SetupWatcher();
+        }
+
+        public static RepositoryManager CreateInstance(IPlatform platform, ITaskManager taskManager,
             IGitClient gitClient, NPath repositoryRoot)
         {
             var repositoryPathConfiguration = new RepositoryPathConfiguration(repositoryRoot);
@@ -128,25 +134,8 @@ namespace GitHub.Unity
 
             var repositoryWatcher = new RepositoryWatcher(platform, repositoryPathConfiguration, taskManager.Token);
 
-            return new RepositoryManager(platform, taskManager, usageTracker, gitConfig, repositoryWatcher,
-                gitClient, repositoryPathConfiguration, taskManager.Token);
-        }
-
-        public RepositoryManager(IPlatform platform, ITaskManager taskManager, IUsageTracker usageTracker, IGitConfig gitConfig,
-            IRepositoryWatcher repositoryWatcher, IGitClient gitClient,
-            IRepositoryPathConfiguration repositoryPaths, CancellationToken cancellationToken)
-        {
-            this.repositoryPaths = repositoryPaths;
-            this.platform = platform;
-            this.taskManager = taskManager;
-            this.usageTracker = usageTracker;
-            this.cancellationToken = cancellationToken;
-            this.gitClient = gitClient;
-            this.watcher = repositoryWatcher;
-            this.config = gitConfig;
-
-            SetupConfig(repositoryPaths);
-            SetupWatcher();
+            return new RepositoryManager(platform, gitConfig, repositoryWatcher,
+                gitClient, repositoryPathConfiguration);
         }
 
         public void Initialize()
@@ -158,6 +147,9 @@ namespace GitHub.Unity
         public void Start()
         {
             Logger.Trace("Start");
+
+            UpdateConfigData();
+            LoadGitUser();
             watcher.Start();
         }
 
@@ -178,10 +170,13 @@ namespace GitHub.Unity
             return watcher.CheckAndProcessEvents();
         }
 
-        public void Refresh()
+        public ITask CommitAllFiles(string message, string body)
         {
-            Logger.Trace("Refresh");
-            UpdateGitStatus();
+            var add = GitClient.AddAll();
+            add.OnStart += t => IsBusy = true;
+            return add
+                .Then(GitClient.Commit(message, body))
+                .Finally(() => IsBusy = false);
         }
 
         public ITask CommitFiles(List<string> files, string message, string body)
@@ -191,6 +186,20 @@ namespace GitHub.Unity
             return add
                 .Then(GitClient.Commit(message, body))
                 .Finally(() => IsBusy = false);
+        }
+
+        public ITask<List<GitLogEntry>> Log()
+        {
+            var task = GitClient.Log();
+            HookupHandlers(task);
+            return task;
+        }
+
+        public ITask<GitStatus> Status()
+        {
+            var task = GitClient.Status();
+            HookupHandlers(task);
+            return task;
         }
 
         public ITask Fetch(string remote)
@@ -223,7 +232,9 @@ namespace GitHub.Unity
             HookupHandlers(task);
             if (!platform.Environment.IsWindows)
             {
-                task.Then(_ => UpdateConfigData());
+                task.Then(_ => {
+                    UpdateConfigData(true);
+                });
             }
             return task;
         }
@@ -234,7 +245,9 @@ namespace GitHub.Unity
             HookupHandlers(task);
             if (!platform.Environment.IsWindows)
             {
-                task.Then(_ => UpdateConfigData());
+                task.Then(_ => {
+                    UpdateConfigData(true);
+                });
             }
             return task;
         }
@@ -263,36 +276,37 @@ namespace GitHub.Unity
             return HookupHandlers(task);
         }
 
-        public ITask ListLocks(bool local)
+        public ITask<List<GitLock>> ListLocks(bool local)
         {
-            var task = GitClient
-                .ListLocks(local)
-                .Then((s, t) =>
-                {
-                    if (locks == null || !locks.SequenceEqual(t))
-                    {
-                        locks = t;
-                        Logger.Trace("OnLocksUpdated");
-                        OnLocksUpdated(locks);
-                    }
-                });
-            return HookupHandlers(task);
+            var task = GitClient.ListLocks(local);
+            HookupHandlers(task);
+            return task;
         }
 
         public ITask LockFile(string file)
         {
             var task = GitClient.Lock(file);
-            HookupHandlers(task);
-            ListLocks(false);
-            return task;
+            return HookupHandlers(task);
         }
 
         public ITask UnlockFile(string file, bool force)
         {
             var task = GitClient.Unlock(file, force);
-            HookupHandlers(task).Schedule(taskManager);
-            ListLocks(false);
-            return task;
+            return HookupHandlers(task);
+        }
+
+        public void UpdateConfigData()
+        {
+            UpdateConfigData(false);
+        }
+
+        private void LoadGitUser()
+        {
+            GitClient.GetConfigUserAndEmail()
+                .Then((success, user) => {
+                    Logger.Trace("OnGitUserLoaded: {0}", user);
+                    OnGitUserLoaded?.Invoke(user);
+                }).Start();
         }
 
         private void SetupWatcher()
@@ -308,17 +322,17 @@ namespace GitHub.Unity
             watcher.RemoteBranchDeleted += Watcher_OnRemoteBranchDeleted;
         }
 
-        private void SetupConfig(IRepositoryPathConfiguration repositoryPaths)
+        private void UpdateHead()
         {
-            this.head = repositoryPaths.DotGitHead.ReadAllLines().FirstOrDefault();
-            RefreshConfigData();
+            var head = repositoryPaths.DotGitHead.ReadAllLines().FirstOrDefault();
+            Logger.Trace("UpdateHead: {0}", head ?? "[NULL]");
+            UpdateCurrentBranchAndRemote(head);
         }
 
         private ITask HookupHandlers(ITask task, bool disableWatcher = false)
         {
             task.OnStart += t => {
                 Logger.Trace("Start " + task.Name);
-
                 IsBusy = true;
 
                 if (disableWatcher)
@@ -342,97 +356,117 @@ namespace GitHub.Unity
 
         private void Watcher_OnRemoteBranchDeleted(string remote, string name)
         {
-            RemoveRemoteBranch(remote, name);
+            OnRemoteBranchRemoved?.Invoke(remote, name);
         }
 
         private void Watcher_OnRemoteBranchCreated(string remote, string name)
         {
-            AddRemoteBranch(remote, name);
+            OnRemoteBranchAdded?.Invoke(remote, name);
         }
 
         private void Watcher_OnRepositoryChanged()
         {
-            UpdateGitStatus();
-        }
-
-        private void UpdateGitStatus()
-        {
-            Logger.Trace("Updating Git Status");
-
-            var task = GitClient.Status()
-                .Finally((success, ex, data) =>
-                {
-                    if (success && data.HasValue)
-                    {
-                        OnStatusUpdated?.Invoke(data.Value);
-                    }
-                    Logger.Trace("Updated Git Status");
-                });
-
-            HookupHandlers(task).Start();
+            Logger.Trace("OnRepositoryChanged");
+            OnRepositoryUpdated?.Invoke();
         }
 
         private void Watcher_OnConfigChanged()
         {
-            UpdateConfigData();
+            UpdateConfigData(true);
         }
 
-        private void UpdateConfigData()
-        {
-            config.Reset();
-            RefreshConfigData();
-        }
-
-        private void Watcher_OnHeadChanged(string contents)
+        private void Watcher_OnHeadChanged()
         {
             Logger.Trace("Watcher_OnHeadChanged");
-            head = contents;
-            ActiveBranch = GetActiveBranch();
-            ActiveRemote = GetActiveRemote();
-            OnHeadChanged?.Invoke();
-            UpdateGitStatus();
+            UpdateHead();
+        }
+
+        private void UpdateCurrentBranchAndRemote(string head)
+        {
+            ConfigBranch? branch = null;
+
+            if (head.StartsWith("ref:"))
+            {
+                var branchName = head.Substring(head.IndexOf("refs/heads/") + "refs/heads/".Length);
+                branch = config.GetBranch(branchName);
+
+                if (!branch.HasValue)
+                {
+                    branch = new ConfigBranch { Name = branchName };
+                }
+            }
+
+            var defaultRemote = "origin";
+            ConfigRemote? remote = null;
+
+            if (branch.HasValue && branch.Value.IsTracking)
+            {
+                remote = branch.Value.Remote;
+            }
+
+            if (!remote.HasValue)
+            {
+                remote = config.GetRemote(defaultRemote);
+            }
+
+            if (!remote.HasValue)
+            {
+                var configRemotes = config.GetRemotes().ToArray();
+                if (configRemotes.Any())
+                {
+                    remote = configRemotes.FirstOrDefault();
+                }
+            }
+
+            Logger.Trace("OnCurrentBranchUpdated: {0}", branch.HasValue ? branch.Value.ToString() : "[NULL]");
+            Logger.Trace("OnCurrentRemoteUpdated: {0}", remote.HasValue ? remote.Value.ToString() : "[NULL]");
+            OnCurrentBranchAndRemoteUpdated?.Invoke(branch, remote);
         }
 
         private void Watcher_OnIndexChanged()
-        {
-        }
+        {}
 
         private void Watcher_OnLocalBranchCreated(string name)
         {
-            AddLocalBranch(name);
+            OnLocalBranchAdded?.Invoke(name);
         }
 
         private void Watcher_OnLocalBranchDeleted(string name)
         {
-            RemoveLocalBranch(name);
+            OnLocalBranchRemoved?.Invoke(name);
         }
 
         private void Watcher_OnLocalBranchChanged(string name)
         {
-            if (name == ActiveBranch?.Name)
-            {
-                OnActiveBranchChanged?.Invoke(name);
-                UpdateGitStatus();
-            }
+            OnLocalBranchUpdated?.Invoke(name);
         }
 
-        private void RefreshConfigData()
+        private void UpdateConfigData(bool resetConfig = false)
         {
-            Logger.Trace("RefreshConfigData");
+            Logger.Trace("UpdateConfigData reset:{0}", resetConfig);
+
+            if (resetConfig)
+            {
+                config.Reset();
+            }
+
             LoadBranchesFromConfig();
             LoadRemotesFromConfig();
-
-            ActiveBranch = GetActiveBranch();
-            ActiveRemote = GetActiveRemote();
+            UpdateHead();
         }
 
         private void LoadBranchesFromConfig()
         {
-            branches.Clear();
-            LoadBranchesFromConfig(repositoryPaths.BranchesPath, config.GetBranches().Where(x => x.IsTracking), "");
+            Logger.Trace("LoadBranchesFromConfig");
+
+            var branches = new Dictionary<string, ConfigBranch>();
+            LoadBranchesFromConfig(branches, repositoryPaths.BranchesPath, config.GetBranches().Where(x => x.IsTracking), "");
+
+            Logger.Trace("OnLocalBranchListUpdated {0} branches", branches.Count);
+            OnLocalBranchListUpdated?.Invoke(branches);
         }
 
-        private void LoadBranchesFromConfig(NPath path, IEnumerable<ConfigBranch> configBranches, string prefix)
+        private void LoadBranchesFromConfig(Dictionary<string, ConfigBranch> branches, NPath path, IEnumerable<ConfigBranch> configBranches, string prefix)
         {
             foreach (var file in path.Files())
             {
@@ -448,14 +482,16 @@ namespace GitHub.Unity
 
             foreach (var dir in path.Directories())
             {
-                LoadBranchesFromConfig(dir, configBranches, prefix + dir.FileName + "/");
+                LoadBranchesFromConfig(branches, dir, configBranches, prefix + dir.FileName + "/");
             }
         }
 
         private void LoadRemotesFromConfig()
         {
-            remotes = config.GetRemotes().ToDictionary(x => x.Name, x => x);
-            remoteBranches = new Dictionary<string, Dictionary<string, ConfigBranch>>();
+            Logger.Trace("LoadRemotesFromConfig");
+
+            var remotes = config.GetRemotes().ToArray().ToDictionary(x => x.Name, x => x);
+            var remoteBranches = new Dictionary<string, Dictionary<string, ConfigBranch>>();
 
             foreach (var remote in remotes.Keys)
             {
@@ -474,103 +510,9 @@ namespace GitHub.Unity
                     remoteBranches.Add(remote, branchList);
                 }
             }
-        }
 
-        private ConfigRemote? GetActiveRemote(string defaultRemote = "origin")
-        {
-            var branch = ActiveBranch;
-            if (branch.HasValue && branch.Value.IsTracking)
-            {
-                return branch.Value.Remote;
-            }
-
-            var remote = config.GetRemote(defaultRemote);
-            if (remote.HasValue)
-            {
-                return remote;
-            }
-
-            using (var remoteEnumerator = config.GetRemotes().GetEnumerator())
-            {
-                if (remoteEnumerator.MoveNext())
-                {
-                    return remoteEnumerator.Current;
-                }
-            }
-
-            return null;
-        }
-
-        private ConfigBranch? GetActiveBranch()
-        {
-            if (head.StartsWith("ref:"))
-            {
-                var branch = head.Substring(head.IndexOf("refs/heads/") + "refs/heads/".Length);
-                return GetBranch(branch);
-            }
-            else
-            {
-                return null;
-            }
-        }
-
-        private ConfigBranch? GetBranch(string name)
-        {
-            if (branches.ContainsKey(name))
-            {
-                return branches[name];
-            }
-
-            return null;
-        }
-
-        private void AddLocalBranch(string name)
-        {
-            if (!branches.ContainsKey(name))
-            {
-                var branch = config.GetBranch(name);
-                if (!branch.HasValue)
-                {
-                    branch = new ConfigBranch { Name = name };
-                }
-                branches.Add(name, branch.Value);
-                OnLocalBranchListChanged?.Invoke();
-            }
-        }
-
-        private void RemoveLocalBranch(string oldName)
-        {
-            if (branches.ContainsKey(oldName))
-            {
-                branches.Remove(oldName);
-                OnLocalBranchListChanged?.Invoke();
-            }
-        }
-
-        private void AddRemoteBranch(string remote, string name)
-        {
-            Dictionary<string, ConfigBranch> branchList = null;
-            if (remoteBranches.TryGetValue(remote, out branchList))
-            {
-                if (!branchList.ContainsKey(name))
-                {
-                    branchList.Add(name, new ConfigBranch { Name = name, Remote = remotes[remote] });
-                    OnRemoteBranchListChanged?.Invoke();
-                }
-            }
-        }
-
-        private void RemoveRemoteBranch(string remote, string name)
-        {
-            Dictionary<string, ConfigBranch> branchList = null;
-            if (remoteBranches.TryGetValue(remote, out branchList))
-            {
-                if (branches.ContainsKey(name))
-                {
-                    branches.Remove(name);
-                    OnRemoteBranchListChanged?.Invoke();
-                }
-            }
+            Logger.Trace("OnRemoteBranchListUpdated {0} remotes", remotes.Count);
+            OnRemoteBranchListUpdated?.Invoke(remotes, remoteBranches);
         }
 
         private bool disposed;
@@ -593,38 +535,7 @@ namespace GitHub.Unity
             GC.SuppressFinalize(this);
         }
 
-        public Dictionary<string, ConfigBranch> LocalBranches => branches;
-        public Dictionary<string, Dictionary<string, ConfigBranch>> RemoteBranches => remoteBranches;
-
         public IGitConfig Config => config;
-
-        public ConfigBranch? ActiveBranch
-        {
-            get { return activeBranch; }
-            private set
-            {
-                if (activeBranch.HasValue != value.HasValue || (activeBranch.HasValue && !activeBranch.Value.Equals(value.Value)))
-                {
-                    activeBranch = value;
-                    Logger.Trace("OnActiveBranchChanged: {0}", value?.ToString() ?? "NULL");
-                    OnActiveBranchChanged?.Invoke(activeBranch.Value.Name);
-                }
-            }
-        }
-
-        public ConfigRemote? ActiveRemote
-        {
-            get { return activeRemote; }
-            private set
-            {
-                if (activeRemote.HasValue != value.HasValue || (activeRemote.HasValue && !activeRemote.Value.Equals(value.Value)))
-                {
-                    activeRemote = value;
-                    Logger.Trace("OnActiveRemoteChanged: {0}", value?.ToString() ?? "NULL");
-                    OnActiveRemoteChanged?.Invoke(activeRemote);
-                }
-            }
-        }
 
         public IGitClient GitClient => gitClient;
 

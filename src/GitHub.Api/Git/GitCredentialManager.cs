@@ -11,14 +11,12 @@ namespace GitHub.Unity
         private ICredential credential;
         private string credHelper = null;
 
-        private readonly IEnvironment environment;
         private readonly IProcessManager processManager;
         private readonly ITaskManager taskManager;
 
-        public GitCredentialManager(IEnvironment environment, IProcessManager processManager,
+        public GitCredentialManager(IProcessManager processManager,
             ITaskManager taskManager)
         {
-            this.environment = environment;
             this.processManager = processManager;
             this.taskManager = taskManager;
         }
@@ -132,6 +130,8 @@ namespace GitHub.Unity
             credHelper = await new GitConfigGetTask("credential.helper", GitConfigSource.NonSpecified, taskManager.Token)
                 .Configure(processManager)
                 .StartAwait();
+
+            Logger.Trace("Loaded Credential Helper: {0}", credHelper);
 
             if (credHelper != null)
             {

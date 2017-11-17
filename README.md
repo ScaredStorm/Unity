@@ -1,11 +1,16 @@
 # [GitHub for Unity](https://unity.github.com)
 
+## Notices
+
+From version 0.19 onwards, the location of the plugin has moved to `Assets/Plugins/GitHub`. If you have version 0.18 or lower, you need to delete the `Assets/Editor/GitHub` folder before you install newer versions. You should exit Unity and delete the folder from Explorer/Finder, as Unity will not unload native libraries while it's running. Also, remember to update your `.gitignore` file.
+
 ![Build Status](https://ci.appveyor.com/api/projects/status/github/github-for-unity/Unity?branch=master&svg=true)
 
 [![Join the chat at https://gitter.im/github-for-unity/Unity](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/github-for-unity/Unity?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![Join the chat at https://discord.gg/5zH8hVx](https://img.shields.io/badge/discord-join%20chat-7289DA.svg)](https://discord.gg/5zH8hVx)
 [![GitHub for Unity live coding on Twitch](https://img.shields.io/badge/twitch-live%20coding-6441A4.svg)](https://www.twitch.tv/sh4na)
 
+## About
 
 The GitHub for Unity extension brings [Git](https://git-scm.com/) and GitHub into [Unity](https://unity3d.com/), integrating source control into your work with friendly and accessible tools and workflows.
 
@@ -42,8 +47,8 @@ The GitHub for Unity extension brings [Git](https://git-scm.com/) and GitHub int
 
 ### Requirements
 
-- Unity 5.4-5.6
-   - We've only tested the extension so far on Unity 5.4 to 5.6. There's currently an blocker issue opened for 5.3 support, so we know it doesn't run there. There are some issues for 2017.x, so it may or may not run well on that version. Personal edition is fine.
+- Unity 5.4-2017.1
+   - We've only tested the extension so far on Unity 5.4 to 2017.1. There's currently an blocker issue opened for 5.3 support, so we know it doesn't run there. There are some issues for 2017.2, so it may or may not run well on that version. Personal edition is fine.
 - Git and Git LFS 2.x
 
 #### Git on macOS
@@ -76,7 +81,11 @@ Once the extension is installed, you can open a command line with the same Git a
 
 ### Installation
 
-To install the extension, download the latest package from [the releases page](https://github.com/github-for-unity/Unity/releases) and double click on it.
+This extensions needs to be installed (and updated) for each Unity project that you want to version control. 
+First step is to download the latest package from [the releases page](https://github.com/github-for-unity/Unity/releases);
+it will be saved as a file with the extension `.unitypackage`.
+To install it, open Unity, then open the project you want to version control, and then double click on the downloaded package.
+Alternatively, import the package by clicking Assets, Import Package, Custom Package, then select the downloaded package.
 
 #### Log files
 

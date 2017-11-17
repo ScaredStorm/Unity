@@ -2,7 +2,7 @@ using System.Threading.Tasks;
 
 namespace GitHub.Unity
 {
-    interface IPlatform
+    public interface IPlatform
     {
         IPlatform Initialize(IProcessManager processManager, ITaskManager taskManager);
         IProcessEnvironment GitEnvironment { get; }
@@ -26,7 +26,7 @@ namespace GitHub.Unity
 
             if (CredentialManager == null)
             {
-                CredentialManager = new GitCredentialManager(Environment, processManager, taskManager);
+                CredentialManager = new GitCredentialManager(processManager, taskManager);
                 Keychain = new Keychain(Environment, CredentialManager);
                 Keychain.Initialize();
             }

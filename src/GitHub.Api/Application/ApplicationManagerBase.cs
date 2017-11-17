@@ -17,7 +17,7 @@ namespace GitHub.Unity
         {
             SynchronizationContext = synchronizationContext;
             SynchronizationContext.SetSynchronizationContext(SynchronizationContext);
-            ThreadingHelper.SetMainThread();
+            ThreadingHelper.SetUIThread();
             UIScheduler = TaskScheduler.FromCurrentSynchronizationContext();
             ThreadingHelper.MainThreadScheduler = UIScheduler;
             TaskManager = new TaskManager(UIScheduler);
@@ -39,20 +39,24 @@ namespace GitHub.Unity
             Logging.TracingEnabled = UserSettings.Get(Constants.TraceLoggingKey, false);
             ProcessManager = new ProcessManager(Environment, Platform.GitEnvironment, CancellationToken);
             Platform.Initialize(ProcessManager, TaskManager);
-            if (Environment.GitExecutablePath != null)
-            {
-                GitClient = new GitClient(Environment, ProcessManager, Platform.CredentialManager, TaskManager);
-            }
+            GitClient = new GitClient(Environment, ProcessManager, TaskManager);
             SetupMetrics();
         }
 
-        public virtual async Task Run(bool firstRun)
+        public void Run(bool firstRun)
+        {
+            new ActionTask(SetupGit())
+                .Then(RestartRepository)
+                .ThenInUI(InitializeUI)
+                .Start();
+        }
+
+        private async Task SetupGit()
         {
             Logger.Trace("Run - CurrentDirectory {0}", NPath.CurrentDirectory);
 
             if (Environment.GitExecutablePath == null)
             {
-                GitClient = new GitClient(Environment, ProcessManager, Platform.CredentialManager, TaskManager);
                 Environment.GitExecutablePath = await DetermineGitExecutablePath();
 
                 Logger.Trace("Environment.GitExecutablePath \"{0}\" Exists:{1}", Environment.GitExecutablePath, Environment.GitExecutablePath.FileExists());
@@ -60,17 +64,20 @@ namespace GitHub.Unity
                 if (Environment.IsWindows)
                 {
                     var credentialHelper = await GitClient.GetConfig("credential.helper", GitConfigSource.Global).StartAwait();
-                    if (string.IsNullOrEmpty(credentialHelper))
+
+                    if (!string.IsNullOrEmpty(credentialHelper))
                     {
+                        Logger.Trace("Windows CredentialHelper: {0}", credentialHelper);
+                    }
+                    else
+                    {
+                        Logger.Warning("No Windows CredentialHeloper found: Setting to wincred");
+
                         await GitClient.SetConfig("credential.helper", "wincred", GitConfigSource.Global).StartAwait();
                     }
                 }
             }
 
-            RestartRepository();
-            InitializeUI();
-
-            new ActionTask(new Task(() => LoadKeychain().Start())).Start();
         }
 
         public ITask InitializeRepository()
@@ -79,8 +86,13 @@ namespace GitHub.Unity
 
             var targetPath = NPath.CurrentDirectory;
 
-            var unityYamlMergeExec = Environment.UnityApplication.Parent.Combine("Tools", "UnityYAMLMerge");
-            var yamlMergeCommand = $@"'{unityYamlMergeExec}' merge -p ""$BASE"" ""$REMOTE"" ""$LOCAL"" ""$MERGED""";
+            var unityYamlMergeExec = Environment.IsWindows
+                ? Environment.UnityApplication.Parent.Combine("Data", "Tools", "UnityYAMLMerge.exe")
+                : Environment.UnityApplication.Combine("Contents", "Tools", "UnityYAMLMerge");
+
+            var yamlMergeCommand = Environment.IsWindows
+                ? $@"'{unityYamlMergeExec}' merge -p ""$BASE"" ""$REMOTE"" ""$LOCAL"" ""$MERGED"""
+                : $@"'{unityYamlMergeExec}' merge -p '$BASE' '$REMOTE' '$LOCAL' '$MERGED'";
 
             var gitignore = targetPath.Combine(".gitignore");
             var gitAttrs = targetPath.Combine(".gitattributes");
@@ -102,38 +114,24 @@ namespace GitHub.Unity
                 }))
                 .Then(GitClient.Add(filesForInitialCommit))
                 .Then(GitClient.Commit("Initial commit", null))
-                .Then(RestartRepository)
+                .Then(_ =>
+                {
+                    Environment.InitializeRepository();
+                    RestartRepository();
+                })
                 .ThenInUI(InitializeUI);
             return task;
         }
 
         public void RestartRepository()
         {
-            Environment.InitializeRepository();
             if (Environment.RepositoryPath != null)
             {
-                repositoryManager = Unity.RepositoryManager.CreateInstance(Platform, TaskManager, UsageTracker, GitClient, Environment.RepositoryPath);
-                Environment.Repository = new Repository(GitClient, repositoryManager, Environment.RepositoryPath);
+                repositoryManager = Unity.RepositoryManager.CreateInstance(Platform, TaskManager, GitClient, Environment.RepositoryPath);
                 repositoryManager.Initialize();
-                Environment.Repository.Initialize();
+                Environment.Repository.Initialize(repositoryManager);
                 repositoryManager.Start();
                 Logger.Trace($"Got a repository? {Environment.Repository}");
-            }
-        }
-
-        private async Task LoadKeychain()
-        {
-            Logger.Trace("Loading Keychain");
-
-            var firstConnection = Platform.Keychain.Hosts.FirstOrDefault();
-            if (firstConnection == null)
-            {
-                Logger.Trace("No Host Found");
-            }
-            else
-            {
-                Logger.Trace("Loading Connection to Host:\"{0}\"", firstConnection);
-                await Platform.Keychain.Load(firstConnection).SafeAwait();
             }
         }
 
@@ -217,7 +215,6 @@ namespace GitHub.Unity
         public ISettings SystemSettings { get; protected set; }
         public ISettings UserSettings { get; protected set; }
         public IUsageTracker UsageTracker { get; protected set; }
-
         protected TaskScheduler UIScheduler { get; private set; }
         protected SynchronizationContext SynchronizationContext { get; private set; }
         protected IRepositoryManager RepositoryManager { get { return repositoryManager; } }

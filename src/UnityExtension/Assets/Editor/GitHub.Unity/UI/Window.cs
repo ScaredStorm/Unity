@@ -1,8 +1,5 @@
-#pragma warning disable 649
-
 using System;
 using System.Linq;
-using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
@@ -14,22 +11,34 @@ namespace GitHub.Unity
         private const float DefaultNotificationTimeout = 4f;
         private const string Title = "GitHub";
         private const string LaunchMenu = "Window/GitHub";
-        private const string RefreshButton = "Refresh";
-        private const string UnknownSubTabError = "Unsupported view mode: {0}";
         private const string BadNotificationDelayError = "A delay of {0} is shorter than the default delay and thus would get pre-empted.";
+        private const string InitializeTitle = "Initialize";
         private const string HistoryTitle = "History";
         private const string ChangesTitle = "Changes";
         private const string BranchesTitle = "Branches";
         private const string SettingsTitle = "Settings";
-        private const string AuthenticationTitle = "Auth";
+        private const string DefaultRepoUrl = "No remote configured";
+        private const string Window_RepoUrlTooltip = "Url of the {0} remote";
+        private const string Window_RepoNoUrlTooltip = "Add a remote in the Settings tab";
+        private const string Window_RepoBranchTooltip = "Active branch";
 
         [NonSerialized] private double notificationClearTime = -1;
-
+        [SerializeField] private SubTab changeTab = SubTab.History;
         [SerializeField] private SubTab activeTab = SubTab.History;
-        [SerializeField] private BranchesView branchesTab = new BranchesView();
-        [SerializeField] private ChangesView changesTab = new ChangesView();
-        [SerializeField] private HistoryView historyTab = new HistoryView();
-        [SerializeField] private SettingsView settingsTab = new SettingsView();
+        [SerializeField] private InitProjectView initProjectView = new InitProjectView();
+        [SerializeField] private BranchesView branchesView = new BranchesView();
+        [SerializeField] private ChangesView changesView = new ChangesView();
+        [SerializeField] private HistoryView historyView = new HistoryView();
+        [SerializeField] private SettingsView settingsView = new SettingsView();
+
+        [SerializeField] private string repoRemote;
+        [SerializeField] private string repoBranch;
+        [SerializeField] private string repoUrl;
+        [SerializeField] private GUIContent repoBranchContent;
+        [SerializeField] private GUIContent repoUrlContent;
+
+        [SerializeField] private CacheUpdateEvent lastCurrentBranchAndRemoteChangedEvent;
+        [NonSerialized] private bool currentBranchAndRemoteHasUpdate;
 
         [MenuItem(LaunchMenu)]
         public static void Window_GitHub()
@@ -53,7 +62,7 @@ namespace GitHub.Unity
         {
             var type = typeof(EditorWindow).Assembly.GetType("UnityEditor.InspectorWindow");
             var window = GetWindow<Window>(type);
-            window.Initialize(applicationManager);
+            window.InitializeWindow(applicationManager);
             window.Show();
         }
 
@@ -66,10 +75,14 @@ namespace GitHub.Unity
         {
             base.Initialize(applicationManager);
 
-            HistoryTab.InitializeView(this);
-            ChangesTab.InitializeView(this);
-            BranchesTab.InitializeView(this);
-            SettingsTab.InitializeView(this);
+            if (!HasRepository && activeTab != SubTab.InitProject && activeTab != SubTab.Settings)
+                changeTab = activeTab = SubTab.InitProject;
+
+            HistoryView.InitializeView(this);
+            ChangesView.InitializeView(this);
+            BranchesView.InitializeView(this);
+            SettingsView.InitializeView(this);
+            InitProjectView.InitializeView(this);
         }
 
         public override void OnEnable()
@@ -79,40 +92,68 @@ namespace GitHub.Unity
 #if DEVELOPER_BUILD
             Selection.activeObject = this;
 #endif
-
             // Set window title
             titleContent = new GUIContent(Title, Styles.SmallLogo);
 
-            if (ActiveTab != null)
-                ActiveTab.OnEnable();
+            if (Repository != null)
+                Repository.CheckCurrentBranchAndRemoteChangedEvent(lastCurrentBranchAndRemoteChangedEvent);
+
+            if (ActiveView != null)
+                ActiveView.OnEnable();
         }
 
         public override void OnDisable()
         {
             base.OnDisable();
-            if (ActiveTab != null)
-                ActiveTab.OnDisable();
+            if (ActiveView != null)
+                ActiveView.OnDisable();
+        }
+
+        public override void OnDataUpdate()
+        {
+            base.OnDataUpdate();
+
+            MaybeUpdateData();
+
+            if (ActiveView != null)
+                ActiveView.OnDataUpdate();
+        }
+
+        public override void OnRepositoryChanged(IRepository oldRepository)
+        {
+            base.OnRepositoryChanged(oldRepository);
+
+            DetachHandlers(oldRepository);
+            AttachHandlers(Repository);
+
+            if (Repository != null && activeTab == SubTab.InitProject)
+            {
+                changeTab = SubTab.History;
+            }
+
+            UpdateActiveTab();
         }
 
         public override void OnSelectionChange()
         {
             base.OnSelectionChange();
-            if (ActiveTab != null)
-                ActiveTab.OnSelectionChange();
+            if (ActiveView != null)
+                ActiveView.OnSelectionChange();
         }
 
         public override void Refresh()
         {
             base.Refresh();
-            if (ActiveTab != null)
-                ActiveTab.Refresh();
+            if (ActiveView != null)
+                ActiveView.Refresh();
+            Repaint();
         }
 
         public override void OnUI()
         {
             base.OnUI();
 
-            if (Repository != null)
+            if (HasRepository)
             {
                 DoHeaderGUI();
             }
@@ -120,9 +161,9 @@ namespace GitHub.Unity
             DoToolbarGUI();
 
             // GUI for the active tab
-            if (ActiveTab != null)
+            if (ActiveView != null)
             {
-                ActiveTab.OnGUI();
+                ActiveView.OnGUI();
             }
         }
 
@@ -139,13 +180,111 @@ namespace GitHub.Unity
             }
         }
 
-        private void SwitchView(Subview from, Subview to)
+        private void MaybeUpdateData()
         {
-            GUI.FocusControl(null);
-            if (from != null)
-                from.OnDisable();
-            to.OnEnable();
-            Refresh();
+            string updatedRepoRemote = null;
+            string updatedRepoUrl = DefaultRepoUrl;
+
+            var shouldUpdateContentFields = false;
+
+            if (Repository != null)
+            {
+                if (currentBranchAndRemoteHasUpdate)
+                {
+                    var repositoryCurrentBranch = Repository.CurrentBranch;
+                    var updatedRepoBranch = repositoryCurrentBranch.HasValue ? repositoryCurrentBranch.Value.Name : null;
+
+                    var repositoryCurrentRemote = Repository.CurrentRemote;
+                    if (repositoryCurrentRemote.HasValue)
+                    {
+                        updatedRepoRemote = repositoryCurrentRemote.Value.Name;
+                        if (!string.IsNullOrEmpty(repositoryCurrentRemote.Value.Url))
+                        {
+                            updatedRepoUrl = repositoryCurrentRemote.Value.Url;
+                        }
+                    }
+
+                    if (repoRemote != updatedRepoRemote)
+                    {
+                        repoRemote = updatedRepoBranch;
+                        shouldUpdateContentFields = true;
+                    }
+
+                    if (repoBranch != updatedRepoBranch)
+                    {
+                        repoBranch = updatedRepoBranch;
+                        shouldUpdateContentFields = true;
+                    }
+
+                    if (repoUrl != updatedRepoUrl)
+                    {
+                        repoUrl = updatedRepoUrl;
+                        shouldUpdateContentFields = true;
+                    }
+                }
+            }
+            else
+            {
+                if (repoRemote != null)
+                {
+                    repoRemote = null;
+                    shouldUpdateContentFields = true;
+                }
+
+                if (repoBranch != null)
+                {
+                    repoBranch = null;
+                    shouldUpdateContentFields = true;
+                }
+
+                if (repoUrl != DefaultRepoUrl)
+                {
+                    repoUrl = DefaultRepoUrl;
+                    shouldUpdateContentFields = true;
+                }
+            }
+
+            if (shouldUpdateContentFields)
+            {
+                repoBranchContent = new GUIContent(repoBranch, Window_RepoBranchTooltip);
+
+                if (updatedRepoRemote != null)
+                {
+                    repoUrlContent = new GUIContent(repoUrl, string.Format(Window_RepoUrlTooltip, updatedRepoRemote));
+                }
+                else
+                {
+                    repoUrlContent = new GUIContent(repoUrl, Window_RepoNoUrlTooltip);
+                }
+            }
+        }
+
+        private void AttachHandlers(IRepository repository)
+        {
+            if (repository == null)
+                return;
+            repository.CurrentBranchAndRemoteChanged += RepositoryOnCurrentBranchAndRemoteChanged;
+        }
+
+        private void RepositoryOnCurrentBranchAndRemoteChanged(CacheUpdateEvent cacheUpdateEvent)
+        {
+            if (!lastCurrentBranchAndRemoteChangedEvent.Equals(cacheUpdateEvent))
+            {
+                new ActionTask(TaskManager.Token, () =>
+                {
+                    lastCurrentBranchAndRemoteChangedEvent = cacheUpdateEvent;
+                    currentBranchAndRemoteHasUpdate = true;
+                    Redraw();
+                })
+                { Affinity = TaskAffinity.UI }.Start();
+            }
+        }
+
+        private void DetachHandlers(IRepository repository)
+        {
+            if (repository == null)
+                return;
+            repository.CurrentBranchAndRemoteChanged -= RepositoryOnCurrentBranchAndRemoteChanged;
         }
 
         private void DoHeaderGUI()
@@ -164,13 +303,9 @@ namespace GitHub.Unity
                 {
                     GUILayout.Space(3);
 
-                    var headerRepoLabelText = String.IsNullOrEmpty(Repository.Owner)
-                        ? Repository.Name
-                        : String.Format("{0}/{1}", Repository.Owner, Repository.Name);
-
-                    GUILayout.Label(headerRepoLabelText, Styles.HeaderRepoLabelStyle);
+                    GUILayout.Label(repoUrlContent, Styles.HeaderRepoLabelStyle);
                     GUILayout.Space(-2);
-                    GUILayout.Label(Repository.CurrentBranch, Styles.HeaderBranchLabelStyle);
+                    GUILayout.Label(repoBranchContent, Styles.HeaderBranchLabelStyle);
                 }
                 GUILayout.EndVertical();
             }
@@ -180,36 +315,57 @@ namespace GitHub.Unity
         private void DoToolbarGUI()
         {
             // Subtabs & toolbar
-            Rect mainNavRect = EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
+            GUILayout.BeginHorizontal(EditorStyles.toolbar);
             {
-                SubTab tab = activeTab;
+                changeTab = activeTab;
                 EditorGUI.BeginChangeCheck();
                 {
-                    if (Repository != null)
+                    if (HasRepository)
                     {
-                        tab = TabButton(SubTab.Changes, ChangesTitle, tab);
-                        tab = TabButton(SubTab.History, HistoryTitle, tab);
-                        tab = TabButton(SubTab.Branches, BranchesTitle, tab);
+                        changeTab = TabButton(SubTab.Changes, ChangesTitle, changeTab);
+                        changeTab = TabButton(SubTab.History, HistoryTitle, changeTab);
+                        changeTab = TabButton(SubTab.Branches, BranchesTitle, changeTab);
                     }
                     else
                     {
-                        tab = TabButton(SubTab.History, HistoryTitle, tab);
+                        changeTab = TabButton(SubTab.InitProject, InitializeTitle, changeTab);
                     }
-                    tab = TabButton(SubTab.Settings, SettingsTitle, tab);
+                    changeTab = TabButton(SubTab.Settings, SettingsTitle, changeTab);
                 }
+
                 if (EditorGUI.EndChangeCheck())
                 {
-                    var from = ActiveTab;
-                    activeTab = tab;
-                    SwitchView(from, ActiveTab);
+                    UpdateActiveTab();
                 }
 
                 GUILayout.FlexibleSpace();
 
-                if(GUILayout.Button("Account", EditorStyles.toolbarDropDown))
-                  DoAccountDropdown();
+                if (GUILayout.Button("Account", EditorStyles.toolbarDropDown))
+                    DoAccountDropdown();
             }
             EditorGUILayout.EndHorizontal();
+        }
+
+        private void UpdateActiveTab()
+        {
+            if (changeTab != activeTab)
+            {
+                var fromView = ActiveView;
+                activeTab = changeTab;
+                SwitchView(fromView, ActiveView);
+            }
+        }
+
+        private void SwitchView(Subview fromView, Subview toView)
+        {
+            GUI.FocusControl(null);
+
+            if (fromView != null)
+                fromView.OnDisable();
+            toView.OnEnable();
+
+            // this triggers a repaint
+            Repaint();
         }
 
         private void DoAccountDropdown()
@@ -231,7 +387,7 @@ namespace GitHub.Unity
 
         private void SignIn(object obj)
         {
-            AuthenticationWindow.Open();
+            PopupWindow.OpenWindow(PopupWindow.PopupViewType.AuthenticationView);
         }
 
         private void GoToProfile(object obj)
@@ -255,22 +411,6 @@ namespace GitHub.Unity
             apiClient.Logout(host);
         }
 
-        private bool ValidateSettings()
-        {
-            var settingsIssues = Utility.Issues.Select(i => i as ProjectSettingsIssue).FirstOrDefault(i => i != null);
-
-            // Initial state
-            if (!Utility.ActiveRepository || !Utility.GitFound ||
-                (settingsIssues != null &&
-                    (settingsIssues.WasCaught(ProjectSettingsEvaluation.EditorSettingsMissing) ||
-                        settingsIssues.WasCaught(ProjectSettingsEvaluation.BadVCSSettings))))
-            {
-                return false;
-            }
-
-            return true;
-        }
-
         public new void ShowNotification(GUIContent content)
         {
             ShowNotification(content, DefaultNotificationTimeout);
@@ -289,52 +429,64 @@ namespace GitHub.Unity
             return GUILayout.Toggle(activeTab == tab, title, EditorStyles.toolbarButton) ? tab : activeTab;
         }
 
-        public HistoryView HistoryTab
-        {
-            get { return historyTab; }
-        }
-
-        public ChangesView ChangesTab
-        {
-            get { return changesTab; }
-        }
-
-        public BranchesView BranchesTab
-        {
-            get { return branchesTab; }
-        }
-
-        public SettingsView SettingsTab
-        {
-            get { return settingsTab; }
-        }
-
-        private Subview ActiveTab
-        {
-            get
-            {
-                return ToView(activeTab);
-            }
-        }
-
         private Subview ToView(SubTab tab)
         {
             switch (tab)
             {
+                case SubTab.InitProject:
+                    return initProjectView;
                 case SubTab.History:
-                    return historyTab;
+                    return historyView;
                 case SubTab.Changes:
-                    return changesTab;
+                    return changesView;
                 case SubTab.Branches:
-                    return branchesTab;
+                    return branchesView;
                 case SubTab.Settings:
+                    return settingsView;
                 default:
-                    return settingsTab;
+                    throw new ArgumentOutOfRangeException();
             }
+        }
+
+        public HistoryView HistoryView
+        {
+            get { return historyView; }
+        }
+
+        public ChangesView ChangesView
+        {
+            get { return changesView; }
+        }
+
+        public BranchesView BranchesView
+        {
+            get { return branchesView; }
+        }
+
+        public SettingsView SettingsView
+        {
+            get { return settingsView; }
+        }
+
+        public InitProjectView InitProjectView
+        {
+            get { return initProjectView; }
+        }
+
+        private Subview ActiveView
+        {
+            get { return ToView(activeTab); }
+        }
+
+        public override bool IsBusy
+        {
+            get { return false; }
         }
 
         private enum SubTab
         {
+            None,
+            InitProject,
             History,
             Changes,
             Branches,

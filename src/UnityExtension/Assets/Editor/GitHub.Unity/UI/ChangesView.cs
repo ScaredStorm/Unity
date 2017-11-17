@@ -1,5 +1,3 @@
-#pragma warning disable 649
-
 using System;
 using System.Linq;
 using UnityEditor;
@@ -19,12 +17,16 @@ namespace GitHub.Unity
         private const string OneChangedFileLabel = "1 changed file";
         private const string NoChangedFilesLabel = "No changed files";
 
-        [NonSerialized] private bool busy = true;
-        [SerializeField] private string commitBody = "";
+        [NonSerialized] private bool currentBranchHasUpdate;
+        [NonSerialized] private bool currentStatusHasUpdate;
+        [NonSerialized] private bool isBusy;
 
+        [SerializeField] private string commitBody = "";
         [SerializeField] private string commitMessage = "";
         [SerializeField] private string currentBranch = "[unknown]";
         [SerializeField] private Vector2 horizontalScroll;
+        [SerializeField] private CacheUpdateEvent lastCurrentBranchChangedEvent;
+        [SerializeField] private CacheUpdateEvent lastStatusChangedEvent;
         [SerializeField] private ChangesetTreeView tree = new ChangesetTreeView();
 
         public override void InitializeView(IView parent)
@@ -36,45 +38,27 @@ namespace GitHub.Unity
         public override void OnEnable()
         {
             base.OnEnable();
-            if (Repository == null)
-                return;
+            AttachHandlers(Repository);
 
-            OnStatusUpdate(Repository.CurrentStatus);
-            Repository.OnStatusUpdated += RunStatusUpdateOnMainThread;
-            Repository.Refresh();
+            if (Repository != null)
+            {
+                Repository.CheckCurrentBranchChangedEvent(lastCurrentBranchChangedEvent);
+                Repository.RefreshStatus();
+            }
         }
 
         public override void OnDisable()
         {
             base.OnDisable();
-            if (Repository == null)
-                return;
-            Repository.OnStatusUpdated -= RunStatusUpdateOnMainThread;
+            DetachHandlers(Repository);
         }
 
-        private void RunStatusUpdateOnMainThread(GitStatus status)
+        public override void OnDataUpdate()
         {
-            new ActionTask(TaskManager.Token, _ => OnStatusUpdate(status))
-                .ScheduleUI(TaskManager);
+            base.OnDataUpdate();
+
+            MaybeUpdateData();
         }
-
-        private void OnStatusUpdate(GitStatus update)
-        {
-            if (update.Entries == null)
-            {
-                //Refresh();
-                return;
-            }
-
-            // Set branch state
-            currentBranch = update.LocalBranch;
-
-            // (Re)build tree
-            tree.UpdateEntries(update.Entries.Where(x => x.Status != GitFileStatus.Ignored).ToList());
-
-            busy = false;
-        }
-
 
         public override void OnGUI()
         {
@@ -99,8 +83,9 @@ namespace GitHub.Unity
                 GUILayout.Label(
                     tree.Entries.Count == 0
                         ? NoChangedFilesLabel
-                        : tree.Entries.Count == 1 ? OneChangedFileLabel : String.Format(ChangedFilesLabel, tree.Entries.Count),
-                    EditorStyles.miniLabel);
+                        : tree.Entries.Count == 1
+                            ? OneChangedFileLabel
+                            : String.Format(ChangedFilesLabel, tree.Entries.Count), EditorStyles.miniLabel);
             }
             GUILayout.EndHorizontal();
 
@@ -114,9 +99,70 @@ namespace GitHub.Unity
             GUILayout.EndHorizontal();
             GUILayout.EndScrollView();
 
-
             // Do the commit details area
             OnCommitDetailsAreaGUI();
+        }
+
+        private void RepositoryOnStatusChanged(CacheUpdateEvent cacheUpdateEvent)
+        {
+            if (!lastStatusChangedEvent.Equals(cacheUpdateEvent))
+            {
+                new ActionTask(TaskManager.Token, () => {
+                    lastStatusChangedEvent = cacheUpdateEvent;
+                    currentStatusHasUpdate = true;
+                    Redraw();
+                }) { Affinity = TaskAffinity.UI }.Start();
+            }
+        }
+
+        private void RepositoryOnCurrentBranchChanged(CacheUpdateEvent cacheUpdateEvent)
+        {
+            if (!lastCurrentBranchChangedEvent.Equals(cacheUpdateEvent))
+            {
+                new ActionTask(TaskManager.Token, () => {
+                    lastCurrentBranchChangedEvent = cacheUpdateEvent;
+                    currentBranchHasUpdate = true;
+                    Redraw();
+                }) { Affinity = TaskAffinity.UI }.Start();
+            }
+        }
+
+        private void AttachHandlers(IRepository repository)
+        {
+            if (repository == null)
+            {
+                return;
+            }
+
+            repository.CurrentBranchChanged += RepositoryOnCurrentBranchChanged;
+            repository.StatusChanged += RepositoryOnStatusChanged;
+        }
+
+        private void DetachHandlers(IRepository repository)
+        {
+            if (repository == null)
+            {
+                return;
+            }
+
+            repository.CurrentBranchChanged -= RepositoryOnCurrentBranchChanged;
+            repository.StatusChanged -= RepositoryOnStatusChanged;
+        }
+
+        private void MaybeUpdateData()
+        {
+            if (currentBranchHasUpdate)
+            {
+                currentBranchHasUpdate = false;
+                currentBranch = string.Format("[{0}]", Repository.CurrentBranchName);
+            }
+
+            if (currentStatusHasUpdate)
+            {
+                currentStatusHasUpdate = false;
+                var gitStatus = Repository.CurrentStatus;
+                tree.UpdateEntries(gitStatus.Entries.Where(x => x.Status != GitFileStatus.Ignored).ToList());
+            }
         }
 
         private void OnCommitDetailsAreaGUI()
@@ -144,7 +190,7 @@ namespace GitHub.Unity
                     GUILayout.Space(Styles.CommitAreaPadding);
 
                     // Disable committing when already committing or if we don't have all the data needed
-                    EditorGUI.BeginDisabledGroup(busy || string.IsNullOrEmpty(commitMessage) || !tree.CommitTargets.Any(t => t.Any));
+                    EditorGUI.BeginDisabledGroup(isBusy || string.IsNullOrEmpty(commitMessage) || !tree.CommitTargets.Any(t => t.Any));
                     {
                         GUILayout.BeginHorizontal();
                         {
@@ -187,33 +233,36 @@ namespace GitHub.Unity
         private void Commit()
         {
             // Do not allow new commits before we have received one successful update
-            busy = true;
+            isBusy = true;
 
             var files = Enumerable.Range(0, tree.Entries.Count)
                 .Where(i => tree.CommitTargets[i].All)
                 .Select(i => tree.Entries[i].Path)
-                .ToArray();
+                .ToList();
 
-            ITask<string> addTask;
+            ITask addTask;
 
-            if (files.Length == tree.Entries.Count)
+            if (files.Count == tree.Entries.Count)
             {
-                addTask = GitClient.AddAll();
+                addTask = Repository.CommitAllFiles(commitMessage, commitBody);
             }
             else
             {
-                addTask = GitClient.Add(files);
+                addTask = Repository.CommitFiles(files, commitMessage, commitBody);
             }
 
             addTask
-                .Then(GitClient.Commit(commitMessage, commitBody))
-                .Then(GitClient.Status())
                 .FinallyInUI((b, exception) => 
                     {
                         commitMessage = "";
                         commitBody = "";
-                        busy = false;
+                        isBusy = false;
                     }).Start();
+        }
+
+        public override bool IsBusy
+        {
+            get { return isBusy; }
         }
     }
 }

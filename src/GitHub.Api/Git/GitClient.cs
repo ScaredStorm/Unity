@@ -6,22 +6,24 @@ using System.Threading.Tasks;
 
 namespace GitHub.Unity
 {
-    interface IGitClient
+    public interface IGitClient
     {
         Task<NPath> FindGitInstallation();
-        bool ValidateGitInstall(NPath path);
+        ITask<ValidateGitInstallResult> ValidateGitInstall(NPath path);
 
         ITask Init(IOutputProcessor<string> processor = null);
 
         ITask LfsInstall(IOutputProcessor<string> processor = null);
 
-        ITask<GitStatus?> Status(IOutputProcessor<GitStatus?> processor = null);
+        ITask<GitStatus> Status(IOutputProcessor<GitStatus> processor = null);
 
         ITask<string> GetConfig(string key, GitConfigSource configSource,
             IOutputProcessor<string> processor = null);
 
         ITask<string> SetConfig(string key, string value, GitConfigSource configSource,
             IOutputProcessor<string> processor = null);
+
+        ITask<User> GetConfigUserAndEmail();
 
         ITask<List<GitLock>> ListLocks(bool local,
             BaseOutputListProcessor<GitLock> processor = null);
@@ -77,23 +79,23 @@ namespace GitHub.Unity
             IOutputProcessor<string> processor = null);
 
         ITask<List<GitLogEntry>> Log(BaseOutputListProcessor<GitLogEntry> processor = null);
+
+        ITask<Version> Version(IOutputProcessor<Version> processor = null);
+
+        ITask<Version> LfsVersion(IOutputProcessor<Version> processor = null);
     }
 
     class GitClient : IGitClient
     {
         private readonly IEnvironment environment;
         private readonly IProcessManager processManager;
-        private readonly ICredentialManager credentialManager;
         private readonly ITaskManager taskManager;
         private readonly CancellationToken cancellationToken;
 
-
-        public GitClient(IEnvironment environment, IProcessManager processManager,
-            ICredentialManager credentialManager, ITaskManager taskManager)
+        public GitClient(IEnvironment environment, IProcessManager processManager, ITaskManager taskManager)
         {
             this.environment = environment;
             this.processManager = processManager;
-            this.credentialManager = credentialManager;
             this.taskManager = taskManager;
             this.cancellationToken = taskManager.Token;
         }
@@ -103,17 +105,30 @@ namespace GitHub.Unity
             if (!String.IsNullOrEmpty(environment.GitExecutablePath))
                 return environment.GitExecutablePath;
 
-            var path = await LookForPortableGit();
+            NPath path = null;
+
+            if (environment.IsWindows)
+                path = await LookForPortableGit();
+
             if (path == null)
                 path = await LookForSystemGit();
 
-            Logger.Trace("Git Installation folder {0} discovered: '{1}'", path == null ? "not" : "", path);
+            if (path == null)
+            {
+                Logger.Trace("Git Installation not discovered");
+            }
+            else
+            {
+                Logger.Trace("Git Installation discovered: '{0}'", path);
+            }
 
             return path;
         }
 
         private Task<NPath> LookForPortableGit()
         {
+            Logger.Trace("LookForPortableGit");
+
             var gitHubLocalAppDataPath = environment.UserCachePath;
             if (!gitHubLocalAppDataPath.DirectoryExists())
                 return null;
@@ -134,18 +149,48 @@ namespace GitHub.Unity
 
         private async Task<NPath> LookForSystemGit()
         {
-            if (environment.IsMac)
+            Logger.Trace("LookForSystemGit");
+
+            NPath path = null;
+            if (!environment.IsWindows)
             {
-                var path = "/usr/local/bin/git".ToNPath();
-                if (path.FileExists())
-                    return path;
+                var p = new NPath("/usr/local/bin/git");
+
+                if (p.FileExists())
+                    path = p;
             }
-            return await new FindExecTask("git", taskManager.Token).StartAwait();
+
+            if (path == null)
+            {
+                path = await new FindExecTask("git", taskManager.Token)
+                    .Configure(processManager).StartAwait();
+            }
+
+            return path;
         }
 
-        public bool ValidateGitInstall(NPath path)
+        public ITask<ValidateGitInstallResult> ValidateGitInstall(NPath path)
         {
-            return path.FileExists();
+            if (!path.FileExists())
+            {
+                return new FuncTask<ValidateGitInstallResult>(TaskEx.FromResult(new ValidateGitInstallResult(false, null, null)));
+            }
+
+            Version gitVersion = null;
+            Version gitLfsVersion = null;
+
+            var gitVersionTask = new GitVersionTask(cancellationToken).Configure(processManager, path);
+            var gitLfsVersionTask = new GitLfsVersionTask(cancellationToken).Configure(processManager, path);
+
+            return gitVersionTask
+                .Then((result, version) => gitVersion = version)
+                .Then(gitLfsVersionTask)
+                .Then((result, version) => gitLfsVersion = version)
+                .Then(success => new ValidateGitInstallResult(success &&
+                    gitVersion?.CompareTo(Constants.MinimumGitVersion) >= 0 &&
+                    gitLfsVersion?.CompareTo(Constants.MinimumGitLfsVersion) >= 0,
+                    gitVersion, gitLfsVersion)
+                );
         }
 
         public ITask Init(IOutputProcessor<string> processor = null)
@@ -162,7 +207,7 @@ namespace GitHub.Unity
                 .Configure(processManager);
         }
 
-        public ITask<GitStatus?> Status(IOutputProcessor<GitStatus?> processor = null)
+        public ITask<GitStatus> Status(IOutputProcessor<GitStatus> processor = null)
         {
             Logger.Trace("Status");
 
@@ -178,9 +223,25 @@ namespace GitHub.Unity
                 .Configure(processManager);
         }
 
+        public ITask<Version> Version(IOutputProcessor<Version> processor = null)
+        {
+            Logger.Trace("Version");
+
+            return new GitVersionTask(cancellationToken, processor)
+                .Configure(processManager);
+        }
+
+        public ITask<Version> LfsVersion(IOutputProcessor<Version> processor = null)
+        {
+            Logger.Trace("LfsVersion");
+
+            return new GitLfsVersionTask(cancellationToken, processor)
+                .Configure(processManager);
+        }
+
         public ITask<string> GetConfig(string key, GitConfigSource configSource, IOutputProcessor<string> processor = null)
         {
-            Logger.Trace("GetConfig");
+            Logger.Trace("GetConfig: {0}", key);
 
             return new GitConfigGetTask(key, configSource, cancellationToken, processor)
                 .Configure(processManager);
@@ -192,6 +253,30 @@ namespace GitHub.Unity
 
             return new GitConfigSetTask(key, value, configSource, cancellationToken, processor)
                 .Configure(processManager);
+        }
+
+        public ITask<User> GetConfigUserAndEmail()
+        {
+            string username = null;
+            string email = null;
+
+            return GetConfig("user.name", GitConfigSource.User)
+                .Then((success, value) => {
+                    if (success)
+                    {
+                        username = value;
+                    }
+                })
+                .Then(GetConfig("user.email", GitConfigSource.User)
+                .Then((success, value) => {
+                    if (success)
+                    {
+                        email = value;
+                    }
+                })).Then(success => {
+                    Logger.Trace("{0}:{1} {2}:{3}", "user.name", username, "user.email", email);
+                    return new User { Name= username, Email = email };
+                });
         }
 
         public ITask<List<GitLock>> ListLocks(bool local, BaseOutputListProcessor<GitLock> processor = null)

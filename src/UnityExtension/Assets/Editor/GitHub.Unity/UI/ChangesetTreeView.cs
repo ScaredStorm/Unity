@@ -1,5 +1,3 @@
-#pragma warning disable 649
-
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -86,12 +84,6 @@ namespace GitHub.Unity
             GUILayout.EndVertical();
         }
 
-        private void OnCommitTreeChange()
-        {
-            Height = 0f;
-            Redraw();
-        }
-
         public void UpdateEntries(IList<GitStatusEntry> newEntries)
         {
             // Handle the empty list scenario
@@ -112,11 +104,25 @@ namespace GitHub.Unity
             OnCommitTreeChange();
         }
 
+        private void OnCommitTreeChange()
+        {
+            Height = 0f;
+            Redraw();
+        }
+
         private void TreeNode(FileTreeNode node)
         {
             GUILayout.Space(Styles.TreeVerticalSpacing);
             var target = node.Target;
             var isFolder = node.Children.Any();
+
+            var isFolderForMeta = false;
+            if (node.Children.Count() == 1)
+            {
+                var parentLabel = node.Label;
+                var childLabel = node.Children.First().Label;
+                isFolderForMeta = childLabel.StartsWith(parentLabel) && childLabel.EndsWith(".meta");
+            }
 
             GUILayout.BeginHorizontal();
             {
@@ -186,7 +192,19 @@ namespace GitHub.Unity
 
                     if (Event.current.type == EventType.Repaint)
                     {
-                        var icon = (Texture) node.Icon ?? (isFolder ? Styles.FolderIcon : Styles.DefaultAssetIcon);
+                        var icon = (Texture) node.Icon;
+                        if (icon == null)
+                        {
+                            if (isFolderForMeta || !isFolder)
+                            {
+                                icon = Styles.DefaultAssetIcon;
+                            }
+                            else
+                            {
+                                icon = Styles.FolderIcon;
+                            }
+                        }
+
                         if (icon != null)
                         {
                             GUI.DrawTexture(iconRect,
@@ -255,7 +273,13 @@ namespace GitHub.Unity
             GUILayout.EndHorizontal();
         }
 
+        public override bool IsBusy
+        {
+            get { return false; }
+        }
+
         public float Height { get; protected set; }
+
         public bool Readonly { get; set; }
 
         public IList<GitStatusEntry> Entries

@@ -7,6 +7,7 @@ namespace GitHub.Unity
     class Styles
     {
         public const float BaseSpacing = 10f,
+                           BrowseButtonWidth = 25f,
                            BroadModeLimit = 500f,
                            NarrowModeLimit = 300f,
                            ModeNotificationDelay = .5f,
@@ -22,6 +23,7 @@ namespace GitHub.Unity
                            CommitAreaDefaultRatio = .4f,
                            CommitAreaMaxHeight = 12 * 15f,
                            CommitAreaPadding = 5f,
+                           PublishViewSpacingHeight = 5f,
                            MinCommitTreePadding = 20f,
                            FoldoutWidth = 11f,
                            FoldoutIndentation = -2f,
@@ -45,18 +47,17 @@ namespace GitHub.Unity
 
         public const int HalfSpacing = (int)(BaseSpacing / 2);
 
-        private const string BrowseButton = "...";
         private const string WarningLabel = "<b>Warning:</b> {0}";
-
-        private static Color headerGreyColor = new Color(0.878f, 0.878f, 0.878f, 1.0f);
 
         private static GUIStyle label,
                                 boldLabel,
+                                centeredErrorLabel,
                                 errorLabel,
                                 deletedFileLabel,
                                 longMessageStyle,
                                 headerBoxStyle,
                                 headerBranchLabelStyle,
+                                headerUrlLabelStyle,
                                 headerRepoLabelStyle,
                                 headerTitleStyle,
                                 headerDescriptionStyle,
@@ -68,6 +69,7 @@ namespace GitHub.Unity
                                 commitFileAreaStyle,
                                 commitButtonStyle,
                                 textFieldStyle,
+                                boldCenteredLabel,
                                 centeredLabel,
                                 commitDescriptionFieldStyle,
                                 toggleMixedStyle,
@@ -82,8 +84,8 @@ namespace GitHub.Unity
         private static Texture2D branchIcon,
                                  activeBranchIcon,
                                  trackingBranchIcon,
-                                 favouriteIconOn,
-                                 favouriteIconOff,
+                                 favoriteIconOn,
+                                 favoriteIconOff,
                                  smallLogoIcon,
                                  bigLogoIcon,
                                  defaultAssetIcon,
@@ -93,9 +95,8 @@ namespace GitHub.Unity
                                  localCommitIcon,
                                  repoIcon,
                                  lockIcon,
+                                 emptyStateInit,
                                  dropdownListIcon;
-
-        private static Color timelineBarColor;
 
         public static Texture2D GetFileStatusIcon(GitFileStatus status, bool isLocked)
         {
@@ -168,23 +169,6 @@ namespace GitHub.Unity
             GUILayout.EndHorizontal();
         }
 
-        public static void PathField(ref string path, Func<string> browseFunction, Func<string, bool> validationFunction)
-        {
-            GUILayout.BeginHorizontal();
-            path = EditorGUILayout.TextField("Path to Git", path);
-            if (GUILayout.Button(BrowseButton, EditorStyles.miniButton, GUILayout.Width(25)))
-            {
-                var newValue = browseFunction();
-                if (!string.IsNullOrEmpty(newValue) && validationFunction(newValue))
-                {
-                    path = newValue;
-                    GUIUtility.keyboardControl = GUIUtility.hotControl = 0;
-                    GUI.changed = true;
-                }
-            }
-            GUILayout.EndHorizontal();
-        }
-
         public static GUIStyle HistoryFileTreeBoxStyle
         {
             get
@@ -245,6 +229,21 @@ namespace GitHub.Unity
                     headerRepoLabelStyle.margin = new RectOffset(0, 0, 0, 0);
                 }
                 return headerRepoLabelStyle;
+            }
+        }
+
+        public static GUIStyle HeaderUrlLabelStyle
+        {
+            get
+            {
+                if (headerUrlLabelStyle == null)
+                {
+                    headerUrlLabelStyle = new GUIStyle(EditorStyles.label);
+                    headerUrlLabelStyle.name = "HeaderUrlLabelStyle";
+                    headerUrlLabelStyle.margin = new RectOffset(0, 0, 0, 0);
+                    headerUrlLabelStyle.fontStyle = FontStyle.Italic;
+                }
+                return headerUrlLabelStyle;
             }
         }
 
@@ -334,6 +333,22 @@ namespace GitHub.Unity
                     errorLabel.normal.textColor = Color.red;
                 }
                 return errorLabel;
+            }
+        }
+
+        public static GUIStyle CenteredErrorLabel
+        {
+            get
+            {
+                if (centeredErrorLabel == null)
+                {
+                    centeredErrorLabel = new GUIStyle(EditorStyles.label);
+                    centeredErrorLabel.alignment = TextAnchor.MiddleCenter;
+                    centeredErrorLabel.name = "CenteredErrorLabel";
+                    centeredErrorLabel.wordWrap = true;
+                    centeredErrorLabel.normal.textColor = Color.red;
+                }
+                return centeredErrorLabel;
             }
         }
 
@@ -543,6 +558,22 @@ namespace GitHub.Unity
             }
         }
 
+        public static GUIStyle BoldCenteredLabel
+        {
+            get
+            {
+                if (boldCenteredLabel == null)
+                {
+                    boldCenteredLabel = new GUIStyle(EditorStyles.boldLabel);
+                    boldCenteredLabel.name = "BoldCenteredLabelStyle";
+                    boldCenteredLabel.alignment = TextAnchor.MiddleCenter;
+                    boldCenteredLabel.wordWrap = true;
+                }
+                return boldCenteredLabel;
+            }
+        }
+
+
         public static GUIStyle CommitDescriptionFieldStyle
         {
             get
@@ -578,7 +609,6 @@ namespace GitHub.Unity
                 {
                     authHeaderBoxStyle = new GUIStyle(HeaderBoxStyle);
                     authHeaderBoxStyle.name = "AuthHeaderBoxStyle";
-                    authHeaderBoxStyle.padding = new RectOffset(10, 10, 0, 5);
                 }
                 return authHeaderBoxStyle;
             }
@@ -594,18 +624,6 @@ namespace GitHub.Unity
                     genericBoxStyle.padding = new RectOffset(5, 5, 5, 5);
                 }
                 return genericBoxStyle;
-            }
-        }
-
-        public static Color TimelineBarColor
-        {
-            get
-            {
-                if (timelineBarColor == null)
-                {
-                    timelineBarColor = new Color(0.51F, 0.51F, 0.51F, 0.2F);
-                }
-                return timelineBarColor;
             }
         }
 
@@ -646,29 +664,29 @@ namespace GitHub.Unity
             }
         }
 
-        public static Texture2D FavouriteIconOn
+        public static Texture2D FavoriteIconOn
         {
             get
             {
-                if (favouriteIconOn == null)
+                if (favoriteIconOn == null)
                 {
-                    favouriteIconOn = Utility.GetIcon("favorite-branch-indicator.png");
+                    favoriteIconOn = Utility.GetIcon("favorite-branch-indicator.png");
                 }
 
-                return favouriteIconOn;
+                return favoriteIconOn;
             }
         }
 
-        public static Texture2D FavouriteIconOff
+        public static Texture2D FavoriteIconOff
         {
             get
             {
-                if (favouriteIconOff == null)
+                if (favoriteIconOff == null)
                 {
-                    favouriteIconOff = FolderIcon;
+                    favoriteIconOff = FolderIcon;
                 }
 
-                return favouriteIconOff;
+                return favoriteIconOff;
             }
         }
 
@@ -785,6 +803,19 @@ namespace GitHub.Unity
                 }
                 return lockIcon;
             }
+        }
+
+        public static Texture2D EmptyStateInit
+        {
+          get
+          {
+            if (emptyStateInit == null)
+            {
+              emptyStateInit = Utility.GetIcon("empty-state-init.png", "empty-state-init@2x.png");
+            }
+            return emptyStateInit;
+          }
+
         }
 
         public static Texture2D DropdownListIcon
